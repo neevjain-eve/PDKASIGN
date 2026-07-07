@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Policy Signer</title>
+<script id="embedded-config" type="application/json">null</script>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --card-bg: #ffffff;
+    --text: #1e2433;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #4f6df5;
+    --name-color: #4f6df5;
+    --sig-color: #16a34a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 32px 20px 60px; }
+  header h1 { font-size: 1.4rem; margin: 0 0 6px; }
+  header .sub { color: var(--muted); margin: 0 0 24px; font-size: 0.9rem; }
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  .card h2 { font-size: 1rem; margin: 0 0 10px; }
+  .muted { color: var(--muted); font-size: 0.85rem; }
+  .row { margin: 12px 0; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  input[type="text"], input[type="url"], input[type="number"], input[type="file"] {
+    font-family: inherit;
+    font-size: 0.9rem;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  button {
+    font-family: inherit;
+    font-size: 0.85rem;
+    padding: 9px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: #fff;
+    cursor: pointer;
+  }
+  button.mode-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
+  button.primary:hover { opacity: 0.92; }
+  .pdf-stage { position: relative; display: inline-block; max-width: 100%; }
+  .pdf-stage canvas { max-width: 100%; display: block; }
+  .box-overlay {
+    position: absolute;
+    font-size: 11px;
+    font-weight: 600;
+    color: #fff;
+    display: flex;
+    align-items: flex-start;
+    justify-content: flex-start;
+    padding: 2px 4px;
+    pointer-events: none;
+    border-radius: 3px;
+  }
+  .box-overlay.name { background: rgba(79,109,245,0.35); border: 1px dashed var(--name-color); }
+  .box-overlay.sig { background: rgba(22,163,74,0.25); border: 1px dashed var(--sig-color); }
+  .field-overlay {
+    position: absolute;
+    box-sizing: border-box;
+    font-family: inherit;
+  }
+  input.field-overlay {
+    background: rgba(79,109,245,0.06);
+    border: 1px dashed var(--name-color);
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-size: 14px;
+  }
+  input.typed-sig { border-color: var(--sig-color); background: rgba(22,163,74,0.06); }
+  canvas.sig-pad { border-radius: 3px; }
+  footer.note { color: var(--muted); font-size: 0.78rem; margin-top: 30px; text-align: center; }
+</style>
+</head>
+<body>
+
+<div id="app"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://unpkg.com/@azure/msal-browser@3/lib/msal-browser.min.js"></script>
+<script>
+(function () {
+  // Capture this document's pristine source before any UI logic mutates the DOM.
+  // Used later (admin mode only) to stamp out a self-contained "signing page" file.
+  var PRISTINE_HTML = "<!DOCTYPE html>\n" + document.documentElement.outerHTML;
+
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+  var configEl = document.getElementById("embedded-config");
+  var CONFIG = null;
+  try { CONFIG = JSON.parse(configEl.textContent); } catch (e) { CONFIG = null; }
+
+  var app = document.getElementById("app");
+
+  // ---------- shared helpers ----------
+
+  function fileToDataUrl(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () { resolve(reader.result); };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function base64ToUint8Array(base64) {
+    var binary = atob(base64);
+    var len = binary.length;
+    var bytes = new Uint8Array(len);
+    for (var i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  function dataUrlToBytes(dataUrl) {
+    var base64 = dataUrl.split(",")[1];
+    return base64ToUint8Array(base64);
+  }
+
+  function sanitizeFilename(name) {
+    var s = name.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase();
+    return s || "employee";
+  }
+
+  async function loadPdfAndRenderPage(pdfDataUrl, pageNumber, maxWidth) {
+    var bytes = dataUrlToBytes(pdfDataUrl);
+    var pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+    var pageNum = Math.min(Math.max(pageNumber, 1), pdf.numPages);
+    var page = await pdf.getPage(pageNum);
+    var base = page.getViewport({ scale: 1 });
+    var scale = Math.min(maxWidth / base.width, 1.6);
+    var viewport = page.getViewport({ scale: scale });
+    var canvas = document.createElement("canvas");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    var ctx = canvas.getContext("2d");
+    await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+    return { canvas: canvas, numPages: pdf.numPages };
+  }
+
+  function stageMaxWidth() {
+    return Math.min(800, (window.innerWidth || 800) - 64);
+  }
+
+  // ================= ADMIN SETUP MODE =================
+
+  function renderAdminMode() {
+    app.innerHTML =
+      '<div class="wrap">' +
+      '<header><h1>Policy Signer &mdash; Admin Setup</h1>' +
+      '<p class="sub">Prepare the policy PDF once, then generate a signing page to send to every employee. Nothing here is uploaded anywhere &mdash; everything runs in this browser tab.</p></header>' +
+
+      '<section class="card">' +
+      "<h2>1. Upload the policy PDF</h2>" +
+      '<input type="file" id="pdfInput" accept="application/pdf">' +
+      '<div class="row"><label>Page to sign on: <input type="number" id="pageNumInput" value="1" min="1" style="width:60px"></label>' +
+      '<span id="pageCount" class="muted"></span></div>' +
+      "</section>" +
+
+      '<section class="card" id="placementCard" style="display:none">' +
+      "<h2>2. Place the Name and Signature boxes</h2>" +
+      '<p class="muted">Pick a mode, then click on the document where that box should go. Click again to move it.</p>' +
+      '<div class="row">' +
+      '<button type="button" class="mode-btn active" id="modeNameBtn">Place Name Box</button>' +
+      '<button type="button" class="mode-btn" id="modeSigBtn">Place Signature Box</button>' +
+      "</div>" +
+      '<div class="row">' +
+      '<label>Name box size: <input type="number" id="nameW" value="220" style="width:60px">&times;<input type="number" id="nameH" value="30" style="width:50px"> px</label>' +
+      '<label>Signature box size: <input type="number" id="sigW" value="220" style="width:60px">&times;<input type="number" id="sigH" value="70" style="width:50px"> px</label>' +
+      "</div>" +
+      '<div class="pdf-stage" id="pdfStage"></div>' +
+      "</section>" +
+
+      '<section class="card" id="oneDriveCard" style="display:none">' +
+      "<h2>3. OneDrive upload link</h2>" +
+      '<p class="muted">In OneDrive: create a folder for signed policies &rarr; right-click &rarr; Share &rarr; set the link so "Anyone with the link" can edit/upload (no sign-in required) &rarr; copy that link here. Every employee will drop their signed PDF into this same link.</p>' +
+      '<input type="url" id="oneDriveLink" placeholder="https://1drv.ms/..." style="width:100%">' +
+      "</section>" +
+
+      '<section class="card" id="msalCard" style="display:none">' +
+      "<h2>4. Connect Microsoft sign-in (for automatic OneDrive upload)</h2>" +
+      '<p class="muted">Each employee will briefly sign in with any Microsoft account to authorize the upload &mdash; they never see or touch your account. This requires a free Azure AD app registration:</p>' +
+      '<ol class="muted" style="padding-left:20px; line-height:1.6">' +
+      '<li>Go to <b>entra.microsoft.com</b> &rarr; App registrations &rarr; New registration.</li>' +
+      '<li>Name it anything (e.g. "Policy Signer"). Under <b>Supported account types</b>, choose "Accounts in any organizational directory and personal Microsoft accounts".</li>' +
+      '<li>Under <b>Redirect URI</b>, choose platform <b>Single-page application (SPA)</b> and enter the exact URL where you will host the generated signing page (e.g. <code>https://yourname.github.io/policy-signer/</code>, including the trailing slash). You can add this later from the app&#39;s "Authentication" page if you do not have the URL yet.</li>' +
+      '<li>After creation, go to <b>API permissions</b> &rarr; Add a permission &rarr; Microsoft Graph &rarr; Delegated &rarr; search and add <b>Files.ReadWrite</b>.</li>' +
+      '<li>Go to the <b>Overview</b> page and copy the <b>Application (client) ID</b>. Paste it below.</li>' +
+      "</ol>" +
+      '<input type="text" id="clientIdInput" placeholder="Azure AD Application (client) ID" style="width:100%">' +
+      "</section>" +
+
+      '<section class="card" id="generateCard" style="display:none">' +
+      "<h2>5. Generate the signing page</h2>" +
+      '<p class="muted">This creates one HTML file. Host it at the exact URL you registered as the redirect URI above (e.g. push it to GitHub Pages), then send that link to every employee &mdash; do not send this admin setup file. Each employee opens it, signs, and their signed PDF uploads straight to your OneDrive folder.</p>' +
+      '<button type="button" class="primary" id="generateBtn">Generate &amp; Download Signing Page</button>' +
+      '<p id="generateMsg" class="muted"></p>' +
+      "</section>" +
+
+      '<footer class="note">Runs entirely in your browser. No backend, no server, no data leaves this tab except what you email or upload yourself.</footer>' +
+      "</div>";
+
+    var state = {
+      pdfDataUrl: null,
+      pageNumber: 1,
+      canvasEl: null,
+      mode: "name",
+      nameBox: null,
+      sigBox: null
+    };
+
+    document.getElementById("pdfInput").addEventListener("change", async function (e) {
+      var file = e.target.files[0];
+      if (!file) return;
+      state.pdfDataUrl = await fileToDataUrl(file);
+      await renderPreview();
+    });
+
+    document.getElementById("pageNumInput").addEventListener("change", async function () {
+      state.pageNumber = parseInt(document.getElementById("pageNumInput").value, 10) || 1;
+      if (state.pdfDataUrl) await renderPreview();
+    });
+
+    document.getElementById("modeNameBtn").addEventListener("click", function () {
+      state.mode = "name";
+      toggleModeButtons();
+    });
+    document.getElementById("modeSigBtn").addEventListener("click", function () {
+      state.mode = "sig";
+      toggleModeButtons();
+    });
+
+    function toggleModeButtons() {
+      document.getElementById("modeNameBtn").classList.toggle("active", state.mode === "name");
+      document.getElementById("modeSigBtn").classList.toggle("active", state.mode === "sig");
+    }
+
+    async function renderPreview() {
+      var result = await loadPdfAndRenderPage(state.pdfDataUrl, state.pageNumber, stageMaxWidth());
+      document.getElementById("pageCount").textContent = "of " + result.numPages + " page(s)";
+
+      var stage = document.getElementById("pdfStage");
+      stage.innerHTML = "";
+      var canvas = result.canvas;
+      canvas.style.border = "1px solid #ddd";
+      stage.appendChild(canvas);
+      state.canvasEl = canvas;
+
+      if (state.nameBox) drawBoxOverlay("name", state.nameBox);
+      if (state.sigBox) drawBoxOverlay("sig", state.sigBox);
+
+      canvas.addEventListener("click", onCanvasClick);
+
+      document.getElementById("placementCard").style.display = "";
+      document.getElementById("oneDriveCard").style.display = "";
+      document.getElementById("msalCard").style.display = "";
+      document.getElementById("generateCard").style.display = "";
+    }
+
+    function onCanvasClick(e) {
+      var canvas = state.canvasEl;
+      var rect = canvas.getBoundingClientRect();
+      var clickX = (e.clientX - rect.left) * (canvas.width / rect.width);
+      var clickY = (e.clientY - rect.top) * (canvas.height / rect.height);
+      var wPx = state.mode === "name"
+        ? parseInt(document.getElementById("nameW").value, 10)
+        : parseInt(document.getElementById("sigW").value, 10);
+      var hPx = state.mode === "name"
+        ? parseInt(document.getElementById("nameH").value, 10)
+        : parseInt(document.getElementById("sigH").value, 10);
+
+      var box = {
+        xFrac: clickX / canvas.width,
+        yFrac: clickY / canvas.height,
+        wFrac: wPx / canvas.width,
+        hFrac: hPx / canvas.height
+      };
+      if (state.mode === "name") state.nameBox = box; else state.sigBox = box;
+      drawBoxOverlay(state.mode, box);
+    }
+
+    function drawBoxOverlay(kind, box) {
+      var stage = document.getElementById("pdfStage");
+      var el = document.getElementById("overlay-" + kind);
+      if (!el) {
+        el = document.createElement("div");
+        el.id = "overlay-" + kind;
+        el.className = "box-overlay " + kind;
+        stage.appendChild(el);
+      }
+      var canvas = state.canvasEl;
+      el.style.left = (box.xFrac * canvas.width) + "px";
+      el.style.top = (box.yFrac * canvas.height) + "px";
+      el.style.width = (box.wFrac * canvas.width) + "px";
+      el.style.height = (box.hFrac * canvas.height) + "px";
+      el.textContent = kind === "name" ? "Name" : "Signature";
+    }
+
+    document.getElementById("generateBtn").addEventListener("click", function () {
+      if (!state.pdfDataUrl) { alert("Upload a PDF first."); return; }
+      if (!state.nameBox || !state.sigBox) { alert("Place both the Name box and the Signature box."); return; }
+      var oneDriveLink = document.getElementById("oneDriveLink").value.trim();
+      if (!oneDriveLink) { alert("Paste your OneDrive upload link first."); return; }
+      var clientId = document.getElementById("clientIdInput").value.trim();
+      if (!clientId) { alert("Paste the Azure AD Application (client) ID first."); return; }
+
+      var config = {
+        pdfDataUrl: state.pdfDataUrl,
+        pageNumber: state.pageNumber,
+        nameBox: state.nameBox,
+        sigBox: state.sigBox,
+        oneDriveLink: oneDriveLink,
+        clientId: clientId
+      };
+      downloadSigningPage(config);
+    });
+
+    function downloadSigningPage(config) {
+      var json = JSON.stringify(config).replace(/<\/script>/gi, "<\/script>");
+      var marker = '<script id="embedded-config" type="application/json">null<\/script>';
+      if (PRISTINE_HTML.indexOf(marker) === -1) {
+        alert("Could not generate the file: template marker not found.");
+        return;
+      }
+      var replacement = '<script id="embedded-config" type="application/json">' + json + '<\/script>';
+      var newHtml = PRISTINE_HTML.replace(marker, replacement);
+      var blob = new Blob([newHtml], { type: "text/html" });
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "sign-policy.html";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      document.getElementById("generateMsg").textContent =
+        "Downloaded sign-policy.html — send this file to every employee.";
+    }
+  }
+
+  // ================= SIGN MODE =================
+
+  function renderSignMode() {
+    app.innerHTML =
+      '<div class="wrap">' +
+      "<header><h1>Sign the Policy Document</h1>" +
+      '<p class="sub">Please review the document, type your name, sign, then submit.</p></header>' +
+
+      '<section class="card"><div class="pdf-stage" id="pdfStage"></div></section>' +
+
+      '<section class="card">' +
+      "<h2>Your Signature</h2>" +
+      '<label class="row"><input type="checkbox" id="typeToggle"> Type my signature instead of drawing</label>' +
+      '<div class="row"><button type="button" id="clearSigBtn">Clear Signature</button></div>' +
+      '<button type="button" class="primary" id="submitBtn">Sign &amp; Download PDF</button>' +
+      '<p id="submitMsg" class="muted"></p>' +
+      "</section>" +
+
+      '<section class="card" id="step2Card" style="display:none">' +
+      "<h2>Step 2 &mdash; Save to OneDrive</h2>" +
+      '<p class="muted" id="step2Desc">A copy of your signed PDF was also downloaded to your device as a backup. Click below and sign in with any Microsoft account (yours, personal or work) to send it straight to the shared OneDrive folder.</p>' +
+      '<button type="button" class="primary" id="uploadBtn">Sign in with Microsoft &amp; Save to OneDrive</button>' +
+      '<p id="uploadMsg" class="muted"></p>' +
+      '<p class="muted">Prefer not to sign in? <a href="#" id="manualLink">Open the OneDrive folder</a> and drag your downloaded file in manually.</p>' +
+      "</section>" +
+
+      '<footer class="note">Runs entirely in your browser. Your signed PDF is generated locally; the only network call it makes is the Microsoft sign-in and the upload of your own signed PDF to the shared OneDrive folder.</footer>' +
+      "</div>";
+
+    var lastSignedBytes = null;
+    var lastFilename = null;
+    var msalInstance = null;
+
+    (async function () {
+      var result = await loadPdfAndRenderPage(CONFIG.pdfDataUrl, CONFIG.pageNumber, stageMaxWidth());
+      var canvas = result.canvas;
+      canvas.style.border = "1px solid #ddd";
+      var stage = document.getElementById("pdfStage");
+      stage.appendChild(canvas);
+
+      var nameInput = document.createElement("input");
+      nameInput.type = "text";
+      nameInput.id = "nameInput";
+      nameInput.placeholder = "Type your full name";
+      nameInput.className = "field-overlay";
+      positionOverlay(nameInput, CONFIG.nameBox, canvas);
+      stage.appendChild(nameInput);
+
+      var sigCanvas = document.createElement("canvas");
+      sigCanvas.id = "sigCanvas";
+      sigCanvas.className = "field-overlay sig-pad";
+      positionOverlay(sigCanvas, CONFIG.sigBox, canvas);
+      sigCanvas.width = CONFIG.sigBox.wFrac * canvas.width;
+      sigCanvas.height = CONFIG.sigBox.hFrac * canvas.height;
+      stage.appendChild(sigCanvas);
+      setupSignaturePad(sigCanvas);
+
+      document.getElementById("clearSigBtn").addEventListener("click", function () {
+        var ctx = sigCanvas.getContext("2d");
+        ctx.clearRect(0, 0, sigCanvas.width, sigCanvas.height);
+        sigCanvas.dataset.hasDrawing = "false";
+      });
+
+      document.getElementById("typeToggle").addEventListener("change", function (e) {
+        var typed = document.getElementById("typedSig");
+        if (e.target.checked) {
+          sigCanvas.style.display = "none";
+          if (!typed) {
+            typed = document.createElement("input");
+            typed.type = "text";
+            typed.id = "typedSig";
+            typed.placeholder = "Type your signature";
+            typed.className = "field-overlay typed-sig";
+            positionOverlay(typed, CONFIG.sigBox, canvas);
+            typed.style.fontFamily = "'Brush Script MT', cursive";
+            typed.style.fontSize = "22px";
+            stage.appendChild(typed);
+          } else {
+            typed.style.display = "";
+          }
+        } else {
+          sigCanvas.style.display = "";
+          if (typed) typed.style.display = "none";
+        }
+      });
+
+      document.getElementById("submitBtn").addEventListener("click", function () {
+        handleSubmit(canvas, sigCanvas);
+      });
+
+      var manualLink = document.getElementById("manualLink");
+      manualLink.href = CONFIG.oneDriveLink;
+      manualLink.target = "_blank";
+
+      document.getElementById("uploadBtn").addEventListener("click", async function () {
+        if (!lastSignedBytes) {
+          alert("Please sign and download your PDF first.");
+          return;
+        }
+        var msg = document.getElementById("uploadMsg");
+        msg.textContent = "Signing in with Microsoft…";
+        try {
+          await uploadToOneDrive(lastSignedBytes, lastFilename);
+          msg.textContent = "Uploaded to OneDrive successfully. You're all set.";
+        } catch (err) {
+          console.error(err);
+          msg.textContent = "Automatic upload failed: " + err.message +
+            " Your signed PDF is still safely downloaded on your device — use the manual link below instead.";
+        }
+      });
+    })();
+
+    function positionOverlay(el, box, canvas) {
+      el.style.position = "absolute";
+      el.style.left = (box.xFrac * canvas.width) + "px";
+      el.style.top = (box.yFrac * canvas.height) + "px";
+      el.style.width = (box.wFrac * canvas.width) + "px";
+      el.style.height = (box.hFrac * canvas.height) + "px";
+    }
+
+    function setupSignaturePad(canvas) {
+      var ctx = canvas.getContext("2d");
+      ctx.strokeStyle = "#1e2433";
+      ctx.lineWidth = 2;
+      ctx.lineCap = "round";
+      canvas.style.background = "rgba(79,109,245,0.05)";
+      canvas.style.border = "1px dashed #4f6df5";
+      canvas.style.touchAction = "none";
+      var drawing = false;
+
+      function pos(e) {
+        var rect = canvas.getBoundingClientRect();
+        return {
+          x: (e.clientX - rect.left) * (canvas.width / rect.width),
+          y: (e.clientY - rect.top) * (canvas.height / rect.height)
+        };
+      }
+      canvas.addEventListener("pointerdown", function (e) {
+        drawing = true;
+        var p = pos(e);
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        canvas.dataset.hasDrawing = "true";
+      });
+      canvas.addEventListener("pointermove", function (e) {
+        if (!drawing) return;
+        var p = pos(e);
+        ctx.lineTo(p.x, p.y);
+        ctx.stroke();
+      });
+      ["pointerup", "pointerleave", "pointercancel"].forEach(function (evt) {
+        canvas.addEventListener(evt, function () { drawing = false; });
+      });
+    }
+
+    function renderTypedSignature(text, box, pdfCanvas) {
+      var w = box.wFrac * pdfCanvas.width;
+      var h = box.hFrac * pdfCanvas.height;
+      var c = document.createElement("canvas");
+      c.width = w;
+      c.height = h;
+      var ctx = c.getContext("2d");
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#1e2433";
+      ctx.font = Math.round(h * 0.6) + "px 'Brush Script MT', cursive";
+      ctx.textBaseline = "middle";
+      ctx.fillText(text, 4, h / 2);
+      return c.toDataURL("image/png");
+    }
+
+    async function bakePdf(config, nameVal, sigDataUrl) {
+      var pdfBytes = dataUrlToBytes(config.pdfDataUrl);
+      var PDFDocument = PDFLib.PDFDocument;
+      var StandardFonts = PDFLib.StandardFonts;
+      var rgb = PDFLib.rgb;
+
+      var pdfDoc = await PDFDocument.load(pdfBytes);
+      var pages = pdfDoc.getPages();
+      var pageIndex = Math.min(Math.max(config.pageNumber - 1, 0), pages.length - 1);
+      var page = pages[pageIndex];
+      var pageWidth = page.getWidth();
+      var pageHeight = page.getHeight();
+      var font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+
+      var nb = config.nameBox;
+      var nbWidthPt = nb.wFrac * pageWidth;
+      var nbHeightPt = nb.hFrac * pageHeight;
+      var nbXPt = nb.xFrac * pageWidth;
+      var nbYPt = pageHeight - (nb.yFrac * pageHeight) - nbHeightPt;
+      var fontSize = Math.max(8, Math.min(18, nbHeightPt * 0.6));
+      page.drawText(nameVal, {
+        x: nbXPt + 2,
+        y: nbYPt + (nbHeightPt - fontSize) / 2,
+        size: fontSize,
+        font: font,
+        color: rgb(0, 0, 0)
+      });
+
+      var sb = config.sigBox;
+      var sbWidthPt = sb.wFrac * pageWidth;
+      var sbHeightPt = sb.hFrac * pageHeight;
+      var sbXPt = sb.xFrac * pageWidth;
+      var sbYPt = pageHeight - (sb.yFrac * pageHeight) - sbHeightPt;
+
+      var pngBytes = dataUrlToBytes(sigDataUrl);
+      var pngImage = await pdfDoc.embedPng(pngBytes);
+      page.drawImage(pngImage, {
+        x: sbXPt,
+        y: sbYPt,
+        width: sbWidthPt,
+        height: sbHeightPt
+      });
+
+      return await pdfDoc.save();
+    }
+
+    // Microsoft Graph "encode sharing URL" scheme:
+    // base64-encode the URL, convert to unpadded base64url, prefix with "u!".
+    // https://learn.microsoft.com/en-us/graph/api/shares-get
+    function encodeSharingUrl(url) {
+      var b64 = btoa(url);
+      var b64url = b64.replace(/=+$/, "").replace(/\//g, "_").replace(/\+/g, "-");
+      return "u!" + b64url;
+    }
+
+    async function getGraphToken() {
+      if (!msalInstance) {
+        msalInstance = new msal.PublicClientApplication({
+          auth: {
+            clientId: CONFIG.clientId,
+            authority: "https://login.microsoftonline.com/common",
+            redirectUri: window.location.origin + window.location.pathname
+          }
+        });
+        await msalInstance.initialize();
+      }
+      var scopes = ["Files.ReadWrite"];
+      var accounts = msalInstance.getAllAccounts();
+      if (accounts.length > 0) {
+        try {
+          var silent = await msalInstance.acquireTokenSilent({ scopes: scopes, account: accounts[0] });
+          return silent.accessToken;
+        } catch (e) {
+          // fall through to interactive popup
+        }
+      }
+      var result = await msalInstance.loginPopup({ scopes: scopes });
+      return result.accessToken;
+    }
+
+    async function uploadToOneDrive(pdfBytes, filename) {
+      var token = await getGraphToken();
+      var shareToken = encodeSharingUrl(CONFIG.oneDriveLink);
+
+      var shareResp = await fetch("https://graph.microsoft.com/v1.0/shares/" + shareToken + "/driveItem", {
+        headers: { Authorization: "Bearer " + token }
+      });
+      if (!shareResp.ok) {
+        throw new Error("Could not open the OneDrive folder (HTTP " + shareResp.status + "). Make sure the link still allows editing.");
+      }
+      var folderItem = await shareResp.json();
+      var driveId = folderItem.parentReference && folderItem.parentReference.driveId;
+      var folderId = folderItem.id;
+      if (!driveId || !folderId) {
+        throw new Error("Could not read the OneDrive folder details from the share link.");
+      }
+
+      var uploadUrl = "https://graph.microsoft.com/v1.0/drives/" + driveId + "/items/" + folderId +
+        ":/" + encodeURIComponent(filename) + ":/content";
+      var putResp = await fetch(uploadUrl, {
+        method: "PUT",
+        headers: { Authorization: "Bearer " + token, "Content-Type": "application/pdf" },
+        body: pdfBytes
+      });
+      if (!putResp.ok) {
+        var text = await putResp.text().catch(function () { return ""; });
+        throw new Error("Upload failed (HTTP " + putResp.status + "). " + text);
+      }
+      return await putResp.json();
+    }
+
+    async function handleSubmit(pdfCanvas, sigCanvas) {
+      var nameVal = document.getElementById("nameInput").value.trim();
+      if (!nameVal) { alert("Please type your name."); return; }
+
+      var typedOn = document.getElementById("typeToggle").checked;
+      var sigDataUrl;
+      if (typedOn) {
+        var typedVal = document.getElementById("typedSig").value.trim();
+        if (!typedVal) { alert("Please type your signature."); return; }
+        sigDataUrl = renderTypedSignature(typedVal, CONFIG.sigBox, pdfCanvas);
+      } else {
+        if (sigCanvas.dataset.hasDrawing !== "true") {
+          alert("Please draw your signature, or check the box to type it instead.");
+          return;
+        }
+        sigDataUrl = sigCanvas.toDataURL("image/png");
+      }
+
+      document.getElementById("submitMsg").textContent = "Preparing your signed PDF…";
+
+      try {
+        var signedBytes = await bakePdf(CONFIG, nameVal, sigDataUrl);
+        var blob = new Blob([signedBytes], { type: "application/pdf" });
+        var filename = sanitizeFilename(nameVal) + "-signed.pdf";
+        var a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+
+        lastSignedBytes = signedBytes;
+        lastFilename = filename;
+
+        document.getElementById("submitMsg").textContent = "Downloaded " + filename + ".";
+        document.getElementById("step2Card").style.display = "";
+      } catch (err) {
+        console.error(err);
+        document.getElementById("submitMsg").textContent =
+          "Something went wrong preparing the PDF: " + err.message;
+      }
+    }
+  }
+
+  // ---------- entry point ----------
+  if (CONFIG) {
+    renderSignMode();
+  } else {
+    renderAdminMode();
+  }
+})();
+</script>
+</body>
+</html>
