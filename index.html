@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Company Policy — Signature</title>
 
-<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
+<script src="https://unpkg.com/@azure/msal-browser@2.38.3/lib/msal-browser.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/signature_pad@4.1.7/dist/signature_pad.umd.min.js"></script>
@@ -338,30 +338,6 @@ function bytesToBase64(bytes) {
     binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
   }
   return btoa(binary);
-}
-
-/* ============================ MODE DETECTION ============================ */
-const params = new URLSearchParams(window.location.search);
-const employeeName = (params.get("name") || "").trim();
-const employeeEmail = (params.get("email") || "").trim();
-const isEmployeeMode = !!(employeeName && employeeEmail);
-
-const overlay = document.getElementById("overlay-loading");
-const showOverlay = (on) => overlay.classList.toggle("hidden", !on);
-
-try {
-  if (isEmployeeMode) {
-    document.getElementById("employee-view").classList.remove("hidden");
-    document.getElementById("header-sub").textContent = `For: ${employeeName} (${employeeEmail})`;
-    initEmployeeView();
-  } else {
-    document.getElementById("admin-view").classList.remove("hidden");
-    document.getElementById("page-title").textContent = "Policy signing — setup console";
-    document.getElementById("header-sub").textContent = "Configure once, then send links to employees.";
-    initAdminView();
-  }
-} catch (e) {
-  showFatalError("This page failed to start up", e);
 }
 
 /* ======================================================================
@@ -1020,6 +996,31 @@ async function sendInvites() {
     document.getElementById("invite-table").innerHTML = `<div class="msg error">${e.message}</div>`;
   }
 }
+/* ============================ MODE DETECTION ============================ */
+const params = new URLSearchParams(window.location.search);
+const employeeName = (params.get("name") || "").trim();
+const employeeEmail = (params.get("email") || "").trim();
+const isEmployeeMode = !!(employeeName && employeeEmail);
+
+const overlay = document.getElementById("overlay-loading");
+const showOverlay = (on) => overlay.classList.toggle("hidden", !on);
+
+try {
+  if (isEmployeeMode) {
+    document.getElementById("employee-view").classList.remove("hidden");
+    document.getElementById("header-sub").textContent = `For: ${employeeName} (${employeeEmail})`;
+    initEmployeeView();
+  } else {
+    document.getElementById("admin-view").classList.remove("hidden");
+    document.getElementById("page-title").textContent = "Policy signing — setup console";
+    document.getElementById("header-sub").textContent = "Configure once, then send links to employees.";
+    initAdminView();
+  }
+} catch (e) {
+  showFatalError("This page failed to start up", e);
+}
+
+
 </script>
 </body>
 </html>
