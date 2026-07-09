@@ -320,30 +320,6 @@ function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
-/* ============================ MODE DETECTION ============================ */
-const params = new URLSearchParams(window.location.search);
-const employeeName = (params.get("name") || "").trim();
-const employeeEmail = (params.get("email") || "").trim();
-const isEmployeeMode = !!(employeeName && employeeEmail);
-
-const overlay = document.getElementById("overlay-loading");
-const showOverlay = (on) => overlay.classList.toggle("hidden", !on);
-
-try {
-  if (isEmployeeMode) {
-    document.getElementById("employee-view").classList.remove("hidden");
-    document.getElementById("header-sub").textContent = `For: ${employeeName} (${employeeEmail})`;
-    initEmployeeView();
-  } else {
-    document.getElementById("admin-view").classList.remove("hidden");
-    document.getElementById("page-title").textContent = "Policy signing — setup console";
-    document.getElementById("header-sub").textContent = "Configure once, then send links to employees.";
-    initAdminView();
-  }
-} catch (e) {
-  showFatalError("This page failed to start up", e);
-}
-
 /* ======================================================================
    EMPLOYEE VIEW
    ====================================================================== */
@@ -999,6 +975,33 @@ async function sendInvites() {
   } catch (e) {
     document.getElementById("invite-table").innerHTML = `<div class="msg error">${e.message}</div>`;
   }
+}
+
+/* ============================ MODE DETECTION ============================
+   Runs LAST, after every function and variable above has been declared, to
+   avoid a "Cannot access 'X' before initialization" error (initAdminView /
+   initEmployeeView reference consts like LS_KEY that must already exist). */
+const params = new URLSearchParams(window.location.search);
+const employeeName = (params.get("name") || "").trim();
+const employeeEmail = (params.get("email") || "").trim();
+const isEmployeeMode = !!(employeeName && employeeEmail);
+
+const overlay = document.getElementById("overlay-loading");
+const showOverlay = (on) => overlay.classList.toggle("hidden", !on);
+
+try {
+  if (isEmployeeMode) {
+    document.getElementById("employee-view").classList.remove("hidden");
+    document.getElementById("header-sub").textContent = `For: ${employeeName} (${employeeEmail})`;
+    initEmployeeView();
+  } else {
+    document.getElementById("admin-view").classList.remove("hidden");
+    document.getElementById("page-title").textContent = "Policy signing — setup console";
+    document.getElementById("header-sub").textContent = "Configure once, then send links to employees.";
+    initAdminView();
+  }
+} catch (e) {
+  showFatalError("This page failed to start up", e);
 }
 </script>
 </body>
