@@ -294,25 +294,6 @@ function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
-/* ============================ MODE DETECTION ============================ */
-const params = new URLSearchParams(window.location.search);
-const employeeName = (params.get("name") || "").trim();
-const employeeEmail = (params.get("email") || "").trim();
-const isEmployeeMode = !!(employeeName && employeeEmail);
-
-const overlay = document.getElementById("overlay-loading");
-const showOverlay = (on) => overlay.classList.toggle("hidden", !on);
-
-if (isEmployeeMode) {
-  document.getElementById("employee-view").classList.remove("hidden");
-  document.getElementById("header-sub").textContent = `For: ${employeeName} (${employeeEmail})`;
-  initEmployeeView();
-} else {
-  document.getElementById("admin-view").classList.remove("hidden");
-  document.getElementById("page-title").textContent = "Policy signing — setup console";
-  document.getElementById("header-sub").textContent = "Configure once, then send links to employees.";
-  initAdminView();
-}
 
 /* ======================================================================
    EMPLOYEE VIEW
@@ -926,6 +907,27 @@ async function sendInvites() {
     document.getElementById("invite-table").innerHTML = `<div class="msg error">${e.message}</div>`;
   }
 }
+/* ============================ MODE DETECTION (runs last, after all functions/vars above are defined) ============================ */
+/* ============================ MODE DETECTION ============================ */
+const params = new URLSearchParams(window.location.search);
+const employeeName = (params.get("name") || "").trim();
+const employeeEmail = (params.get("email") || "").trim();
+const isEmployeeMode = !!(employeeName && employeeEmail);
+
+const overlay = document.getElementById("overlay-loading");
+const showOverlay = (on) => overlay.classList.toggle("hidden", !on);
+
+if (isEmployeeMode) {
+  document.getElementById("employee-view").classList.remove("hidden");
+  document.getElementById("header-sub").textContent = `For: ${employeeName} (${employeeEmail})`;
+  initEmployeeView();
+} else {
+  document.getElementById("admin-view").classList.remove("hidden");
+  document.getElementById("page-title").textContent = "Policy signing — setup console";
+  document.getElementById("header-sub").textContent = "Configure once, then send links to employees.";
+  initAdminView();
+}
+
 </script>
 </body>
 </html>
