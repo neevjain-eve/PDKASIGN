@@ -232,9 +232,11 @@
     <div class="card">
       <h2><span class="step-num">6</span>Send signing links via Outlook</h2>
       <p class="hint">Only do this after you've uploaded the configured file from Step 5 to GitHub.</p>
-      <label>Employee list — one per line as "Full Name, email@company.com"</label>
-      <textarea id="employeeList" rows="5" placeholder="Priya Sharma, priya@company.com
-Rahul Verma, rahul@company.com"></textarea>
+      <label>Employee emails — one per line</label>
+      <textarea id="employeeList" rows="5" placeholder="priya@company.com
+rahul@company.com"></textarea>
+      <p class="hint">The first name used in the email and on the signed PDF is taken automatically from
+        each address (e.g. priya@company.com → "Priya").</p>
 
       <label>Email subject</label>
       <input type="text" id="mailSubject" value="Action required: please sign the company policy" />
@@ -970,12 +972,22 @@ async function generateConfiguredFile() {
 
 /* ---------- send invites ---------- */
 let lastRows = [];
+// Derives a display first name from the local-part of an email address,
+// e.g. "priya.sharma@company.com" -> "Priya", "rahul_verma@x.com" -> "Rahul".
+function firstNameFromEmail(email) {
+  const local = (email.split("@")[0] || "").trim();
+  const first = local.split(/[._\-+0-9]+/).filter(Boolean)[0] || local;
+  return first ? first.charAt(0).toUpperCase() + first.slice(1).toLowerCase() : local;
+}
 function buildRows() {
   const base = window.location.origin + window.location.pathname;
-  const lines = document.getElementById("employeeList").value.split("\n").map(l => l.trim()).filter(Boolean);
+  const lines = document.getElementById("employeeList").value.split("\n")
+    .map(l => l.trim().replace(/,\s*$/, ""))
+    .filter(Boolean);
   return lines.map(line => {
-    const [nm, em] = line.split(",").map(s => (s || "").trim());
-    if (!nm || !em) return null;
+    const em = line;
+    if (!/^\S+@\S+\.\S+$/.test(em)) return null;
+    const nm = firstNameFromEmail(em);
     return { name: nm, email: em, link: `${base}?name=${encodeURIComponent(nm)}&email=${encodeURIComponent(em)}`, status: "Pending" };
   }).filter(Boolean);
 }
@@ -991,7 +1003,7 @@ function renderInviteTable() {
 function previewLinks() {
   try {
     lastRows = buildRows();
-    if (!lastRows.length) throw new Error('No valid rows. Use "Name, email" per line.');
+    if (!lastRows.length) throw new Error('No valid email addresses found. Enter one email per line.');
     renderInviteTable();
   } catch (e) {
     document.getElementById("invite-table").innerHTML = `<div class="msg error">${e.message}</div>`;
@@ -1000,7 +1012,7 @@ function previewLinks() {
 async function sendInvites() {
   try {
     if (!lastRows.length) lastRows = buildRows();
-    if (!lastRows.length) throw new Error('No valid rows. Use "Name, email" per line.');
+    if (!lastRows.length) throw new Error('No valid email addresses found. Enter one email per line.');
     renderInviteTable();
 
     const subjectTpl = document.getElementById("mailSubject").value;
