@@ -192,9 +192,9 @@
         folder below, go to it in OneDrive and <b>share it (Edit access)</b> with the employees who will
         be signing, or with "Everyone in [your organization]", before sending out signing links.</div>
       <div class="row">
-        <button class="btn-secondary" id="btn-load-folders" disabled>Load my folders</button>
+        <button class="btn-secondary" id="btn-load-folders">Load my folders</button>
         <input type="text" id="new-folder-name" placeholder="New folder name (e.g. Signed Policies)" style="flex:1;min-width:200px;" />
-        <button class="btn-secondary" id="btn-create-folder" disabled>Create folder</button>
+        <button class="btn-secondary" id="btn-create-folder">Create folder</button>
       </div>
       <div id="folder-list" class="folder-list"></div>
       <div id="folder-msg"></div>
@@ -252,7 +252,7 @@ Accounts Team</textarea>
 
       <div class="row" style="margin-top:12px;">
         <button class="btn-secondary" id="btn-preview-links">Preview links</button>
-        <button class="btn-ms" id="btn-send-invites" disabled>Send via Outlook</button>
+        <button class="btn-ms" id="btn-send-invites">Send via Outlook</button>
       </div>
       <div id="invite-table"></div>
     </div>
@@ -697,6 +697,22 @@ async function connectMicrosoft() {
     return;
   }
   try {
+    await ensureConnected(true);
+  } catch (e) {
+    msg.innerHTML = `<div class="msg error">Sign-in failed: ${e.message || e}</div>`;
+  }
+}
+
+// Used by Step 2's "Sign in with Microsoft" button, but also called lazily from
+// Load folders / Create folder / Send via Outlook so those still work even if the
+// admin reopened this file in a fresh tab/session and skipped straight to a later
+// step (Steps 3 and 6 stay enabled by default now instead of silently doing nothing).
+async function ensureConnected(forceInteractive) {
+  const s = saveSettings();
+  if (!s.clientId || !s.tenantId) {
+    throw new Error("Fill in the Client ID and Tenant ID above first (Step 1).");
+  }
+  if (!msalApp) {
     msalApp = new msal.PublicClientApplication({
       auth: {
         clientId: s.clientId,
@@ -705,28 +721,35 @@ async function connectMicrosoft() {
       },
       cache: { cacheLocation: "sessionStorage" },
     });
-    const result = await msalApp.loginPopup({ scopes: GRAPH_SCOPES });
-    activeAccount = result.account;
-    document.getElementById("badge-account").textContent = `Connected as ${activeAccount.username}`;
-    document.getElementById("badge-account").classList.add("ok");
-    document.getElementById("badge-outlook").textContent = "Outlook: ready";
-    document.getElementById("badge-outlook").classList.add("ok");
+  }
+  if (!activeAccount) {
+    const cached = msalApp.getAllAccounts();
+    if (cached.length && !forceInteractive) {
+      activeAccount = cached[0];
+    } else {
+      const result = await msalApp.loginPopup({ scopes: GRAPH_SCOPES });
+      activeAccount = result.account;
+    }
+  }
+  document.getElementById("badge-account").textContent = `Connected as ${activeAccount.username}`;
+  document.getElementById("badge-account").classList.add("ok");
+  document.getElementById("badge-outlook").textContent = "Outlook: ready";
+  document.getElementById("badge-outlook").classList.add("ok");
 
+  if (!driveId) {
     const token = await getGraphToken();
     const driveResp = await fetch("https://graph.microsoft.com/v1.0/me/drive?$select=id", {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!driveResp.ok) throw new Error(`Could not read your OneDrive (${driveResp.status}).`);
     driveId = (await driveResp.json()).id;
-    document.getElementById("badge-onedrive").textContent = "OneDrive: connected";
-    document.getElementById("badge-onedrive").classList.add("ok");
-
-    document.getElementById("btn-load-folders").disabled = false;
-    document.getElementById("btn-create-folder").disabled = false;
-    document.getElementById("btn-send-invites").disabled = false;
-  } catch (e) {
-    msg.innerHTML = `<div class="msg error">Sign-in failed: ${e.message || e}</div>`;
   }
+  document.getElementById("badge-onedrive").textContent = "OneDrive: connected";
+  document.getElementById("badge-onedrive").classList.add("ok");
+
+  document.getElementById("btn-load-folders").disabled = false;
+  document.getElementById("btn-create-folder").disabled = false;
+  document.getElementById("btn-send-invites").disabled = false;
 }
 
 /* ---------- folders ---------- */
@@ -736,6 +759,7 @@ async function loadFolders() {
   msg.innerHTML = "";
   list.innerHTML = "Loading…";
   try {
+    await ensureConnected(false);
     const token = await getGraphToken();
     const resp = await fetch(
       "https://graph.microsoft.com/v1.0/me/drive/root/children?$select=id,name,folder&$top=200",
@@ -758,6 +782,7 @@ async function createFolder() {
   msg.innerHTML = "";
   if (!name) { msg.innerHTML = '<div class="msg warn">Type a folder name first.</div>'; return; }
   try {
+    await ensureConnected(false);
     const token = await getGraphToken();
     const resp = await fetch("https://graph.microsoft.com/v1.0/me/drive/root/children", {
       method: "POST",
@@ -1015,6 +1040,7 @@ async function sendInvites() {
     if (!lastRows.length) throw new Error('No valid email addresses found. Enter one email per line.');
     renderInviteTable();
 
+    await ensureConnected(false);
     const subjectTpl = document.getElementById("mailSubject").value;
     const bodyTpl = document.getElementById("mailBody").value;
     const token = await getGraphToken();
