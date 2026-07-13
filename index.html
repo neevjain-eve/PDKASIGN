@@ -186,6 +186,11 @@
     <div class="card">
       <h2><span class="step-num">3</span>Choose destination OneDrive folder</h2>
       <p class="hint">Every signed PDF will be saved here, named after the employee.</p>
+      <div class="msg warn">Important: this folder lives in <b>your</b> OneDrive. Employees sign in with
+        their own Microsoft account, and Graph only lets them write to files/folders they already have
+        access to — it will silently fail for everyone else otherwise. After choosing or creating the
+        folder below, go to it in OneDrive and <b>share it (Edit access)</b> with the employees who will
+        be signing, or with "Everyone in [your organization]", before sending out signing links.</div>
       <div class="row">
         <button class="btn-secondary" id="btn-load-folders" disabled>Load my folders</button>
         <input type="text" id="new-folder-name" placeholder="New folder name (e.g. Signed Policies)" style="flex:1;min-width:200px;" />
@@ -412,6 +417,8 @@ async function signIn() {
         but this link was issued to <b>${employeeEmail}</b>. Please sign out and sign in with the
         correct account before submitting.</div>`;
       activeAccount = null;
+    } else {
+      checkFolderAccess();
     }
   } catch (e) {
     authMsg.innerHTML = `<div class="msg error">Sign-in failed: ${e.message || e}</div>`;
@@ -436,6 +443,26 @@ async function getGraphToken() {
     return (await msalApp.acquireTokenSilent(req)).accessToken;
   } catch (e) {
     return (await msalApp.acquireTokenPopup(req)).accessToken;
+  }
+}
+
+// Runs right after sign-in so a permissions problem shows up before the
+// employee spends time signing, instead of only failing at final Submit.
+async function checkFolderAccess() {
+  const authMsg = document.getElementById("auth-msg");
+  try {
+    const { driveId, itemId } = resolveTargetFolder();
+    const token = await getGraphToken();
+    const resp = await fetch(`https://graph.microsoft.com/v1.0/drives/${driveId}/items/${itemId}?$select=id`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!resp.ok) {
+      authMsg.innerHTML = `<div class="msg warn">Heads up: your account doesn't seem to have access to the
+        destination OneDrive folder yet (error ${resp.status}), so Submit may fail. Ask whoever set this
+        page up to share that folder with you, then reload this page.</div>`;
+    }
+  } catch (_) {
+    /* non-fatal — the real error (if any) will surface at Submit time */
   }
 }
 
@@ -537,6 +564,14 @@ async function submit() {
     );
     if (!uploadResp.ok) {
       const t = await uploadResp.text();
+      if (uploadResp.status === 403 || uploadResp.status === 404) {
+        throw new Error(
+          `Could not save your signed PDF to OneDrive (${uploadResp.status}). This almost always means ` +
+          `the destination folder hasn't been shared with your account yet — ask whoever set up this page ` +
+          `to share the "${CONFIG.ONEDRIVE_FOLDER_NAME || "signed policies"}" folder with you (Edit access) ` +
+          `and try again. Raw error: ${t}`
+        );
+      }
       throw new Error(`Upload failed (${uploadResp.status}): ${t}`);
     }
 
