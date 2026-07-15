@@ -277,20 +277,20 @@ const CONFIG = {
   "ONEDRIVE_FOLDER_NAME": "Signed Policies",
   "NOTIFY_EMAIL": "naveen@pdka.in",
   "SIGNATURE_FIELD": {
-    "pageIndex": 8,
+    "pageIndex": "last",
     "x": 231,
     "y": 761,
     "width": 192,
     "height": 42
   },
   "NAME_FIELD": {
-    "pageIndex": 8,
+    "pageIndex": "last",
     "x": 231,
     "y": 735,
     "fontSize": 24
   },
   "DATE_FIELD": {
-    "pageIndex": 8,
+    "pageIndex": "last",
     "x": 400,
     "y": 738,
     "fontSize": 21
@@ -515,7 +515,15 @@ function refreshSubmitEnabled() {
 }
 
 function resolvePageIndex(spec, totalPages) {
-  return spec.pageIndex === "last" ? totalPages - 1 : spec.pageIndex;
+  const idx = spec.pageIndex === "last" ? totalPages - 1 : spec.pageIndex;
+  if (idx < 0 || idx >= totalPages) {
+    throw new Error(
+      `A signature/name/date field is set to page ${idx + 1}, but this PDF only has ${totalPages} page(s). ` +
+      `This usually means the policy PDF was replaced without re-placing the fields. Please tell whoever ` +
+      `manages this page to redo Step 4 (place fields) and Step 5 (generate & upload) for the current document.`
+    );
+  }
+  return idx;
 }
 
 function resolveTargetFolder() {
@@ -615,6 +623,15 @@ let driveId = null, selectedFolder = null;
 let pdfDoc = null, pdfBytesForAdmin = null, currentPage = 1, currentPageHeightPtsCache = 0;
 let currentPdfFileName = null, currentPdfGeneratedAt = null;
 const boxes = [];
+// Removes all placed field boxes (DOM + tracking array). Must run whenever a
+// *different* PDF is attached — a box's page number/position only makes sense
+// for the document it was placed on. Reusing stale boxes against a new PDF
+// with fewer pages is exactly how "index must be 0 to N but is M" happens
+// when an employee later tries to sign (pdf-lib rejects the out-of-range page).
+function clearBoxes() {
+  boxes.forEach(b => b.el.remove());
+  boxes.length = 0;
+}
 const SCALE = 1.3;
 
 function initAdminView() {
@@ -831,7 +848,10 @@ async function handleFile(file) {
     msg.innerHTML = '<div class="msg error">Please choose a PDF file.</div>';
     return;
   }
-  msg.innerHTML = `<div class="msg ok">Loaded: ${file.name}</div>`;
+  clearBoxes();
+  msg.innerHTML = `<div class="msg ok">Loaded: ${file.name}. Previously placed field boxes were cleared —
+    please re-add and re-position Signature/Name/Date for this document (they don't carry over between
+    different PDFs).</div>`;
   document.getElementById("pdfDrop").textContent = `Selected: ${file.name} (click to change)`;
   currentPdfGeneratedAt = null; // this is a brand-new attach, not yet saved via Step 5
   const buf = await file.arrayBuffer();
