@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
 <title>Company Policy — Signature</title>
 
 <script src="https://unpkg.com/@azure/msal-browser@2.38.3/lib/msal-browser.min.js"></script>
@@ -206,6 +209,7 @@
       <div id="pdfDrop">Click to choose your policy PDF, or drag it here</div>
       <input type="file" id="pdfInput" accept="application/pdf" style="display:none;" />
       <div id="pdf-msg"></div>
+      <p id="pdf-current-file" class="hint"></p>
 
       <div id="placement-area" class="hidden">
         <div class="row" style="margin-top:16px;">
@@ -607,6 +611,7 @@ async function submit() {
 const LS_KEY = "policySigningAdminSettings";
 let driveId = null, selectedFolder = null;
 let pdfDoc = null, pdfBytesForAdmin = null, currentPage = 1, currentPageHeightPtsCache = 0;
+let currentPdfFileName = null, currentPdfGeneratedAt = null;
 const boxes = [];
 const SCALE = 1.3;
 
@@ -648,7 +653,8 @@ function initAdminView() {
   try {
     // If this file already has an embedded PDF (a previously configured copy re-opened for edits), load it.
     if (CONFIG.POLICY_PDF_BASE64 && LIBS_OK.pdfjsLib) {
-      loadPdfBytes(base64ToBytes(CONFIG.POLICY_PDF_BASE64), "(already-embedded policy.pdf)");
+      currentPdfGeneratedAt = CONFIG.CONFIG_GENERATED_AT || null;
+      loadPdfBytes(base64ToBytes(CONFIG.POLICY_PDF_BASE64), CONFIG.POLICY_PDF_FILENAME || "(unnamed file)");
     }
   } catch (e) {
     document.getElementById("pdf-msg").innerHTML = `<div class="msg error">Could not reload the embedded PDF: ${e.message}</div>`;
@@ -825,12 +831,18 @@ async function handleFile(file) {
   }
   msg.innerHTML = `<div class="msg ok">Loaded: ${file.name}</div>`;
   document.getElementById("pdfDrop").textContent = `Selected: ${file.name} (click to change)`;
+  currentPdfGeneratedAt = null; // this is a brand-new attach, not yet saved via Step 5
   const buf = await file.arrayBuffer();
   await loadPdfBytes(new Uint8Array(buf), file.name);
 }
 
 async function loadPdfBytes(bytes, label) {
   pdfBytesForAdmin = bytes;
+  currentPdfFileName = label;
+  const info = document.getElementById("pdf-current-file");
+  info.textContent = currentPdfGeneratedAt
+    ? `Currently embedded in this page: "${label}" (saved ${new Date(currentPdfGeneratedAt).toLocaleString()})`
+    : `Currently loaded: "${label}" — not saved into a file yet. Click "Generate & download" in Step 5, then upload that file to GitHub.`;
   pdfDoc = await pdfjsLib.getDocument({ data: bytes.slice(0) }).promise;
 
   const pageSelect = document.getElementById("pageSelect");
@@ -958,6 +970,7 @@ async function generateConfiguredFile() {
   if (!selectedFolder || !driveId) { out.innerHTML = '<div class="msg warn">Connect to Microsoft and choose a destination folder first (Steps 2-3).</div>'; return; }
 
   const s = saveSettings();
+  const generatedAt = new Date().toISOString();
   const newConfig = {
     CLIENT_ID: s.clientId,
     TENANT_ID: s.tenantId,
@@ -970,6 +983,8 @@ async function generateConfiguredFile() {
     DATE_FIELD: date ? fieldFromBox(date, false) : { pageIndex: "last", x: 340, y: 75, fontSize: 10 },
     GRAPH_SCOPES: ["User.Read", "Files.ReadWrite", "Mail.Send"],
     POLICY_PDF_BASE64: bytesToBase64(pdfBytesForAdmin),
+    POLICY_PDF_FILENAME: currentPdfFileName || "policy.pdf",
+    CONFIG_GENERATED_AT: generatedAt,
   };
 
   try {
@@ -989,7 +1004,15 @@ async function generateConfiguredFile() {
     a.download = "index.html";
     a.click();
 
-    out.innerHTML = '<div class="msg ok">Downloaded. Upload this file to your GitHub repo, replacing the old index.html — that\'s the only file needed.</div>';
+    currentPdfGeneratedAt = generatedAt;
+    document.getElementById("pdf-current-file").textContent =
+      `Currently embedded in this page: "${currentPdfFileName || "policy.pdf"}" (saved ${new Date(generatedAt).toLocaleString()})`;
+
+    out.innerHTML = `<div class="msg ok">Downloaded "index.html" with <b>${currentPdfFileName || "policy.pdf"}</b> embedded
+      (saved ${new Date(generatedAt).toLocaleString()}). Upload this file to your GitHub repo, replacing the old
+      index.html. Your browser may save it as "index (1).html" etc. if you've downloaded one before — check your
+      Downloads folder and upload the newest one, sorted by date modified, not by name. After uploading, reload
+      the live page and confirm this exact filename/timestamp still shows here in Step 4 before sending links.</div>`;
   } catch (e) {
     out.innerHTML = `<div class="msg error">${e.message}. This feature needs the page to be loaded from its real https:// GitHub Pages address (not opened as a local file).</div>`;
   }
