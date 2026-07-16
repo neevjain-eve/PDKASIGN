@@ -227,15 +227,32 @@
 
     <div class="card">
       <h2><span class="step-num">5</span>Save your configured page</h2>
-      <p class="hint">This downloads a new copy of THIS SAME FILE with your settings and PDF baked in.
-        Upload it to GitHub, replacing the old one — it's still just one file.</p>
-      <button class="btn-primary" id="btn-generate-config">Generate &amp; download configured file</button>
+      <p class="hint">Publish updates your PDF and field placements straight to GitHub — one file, one commit,
+        nothing else added to the repo.</p>
+
+      <label>GitHub repo owner</label>
+      <input type="text" id="ghOwner" placeholder="e.g. neevjain-eve" />
+      <label>Repo name</label>
+      <input type="text" id="ghRepo" placeholder="e.g. PDKASIGN" />
+      <label>Branch</label>
+      <input type="text" id="ghBranch" placeholder="main" />
+      <label>File path</label>
+      <input type="text" id="ghPath" placeholder="index.html" />
+      <label>GitHub Personal Access Token</label>
+      <input type="password" id="ghToken" placeholder="ghp_..." autocomplete="off" />
+      <p class="hint">Use a fine-grained token scoped to only this repo with "Contents: Read and write"
+        permission, not a broad classic token. Saved in this browser only, same as the Azure details above.</p>
+
+      <div class="row" style="margin-top:12px;">
+        <button class="btn-primary" id="btn-publish-github">Publish to GitHub</button>
+        <button class="btn-secondary" id="btn-generate-config">Download configured file instead</button>
+      </div>
       <div id="config-output"></div>
     </div>
 
     <div class="card">
       <h2><span class="step-num">6</span>Send signing links via Outlook</h2>
-      <p class="hint">Only do this after you've uploaded the configured file from Step 5 to GitHub.</p>
+      <p class="hint">Only do this after Step 5 is published/uploaded to GitHub.</p>
       <label>Employee emails — one per line</label>
       <textarea id="employeeList" rows="5" placeholder="priya@company.com
 rahul@company.com"></textarea>
@@ -641,6 +658,7 @@ function initAdminView() {
   document.getElementById("btn-load-folders").addEventListener("click", loadFolders);
   document.getElementById("btn-create-folder").addEventListener("click", createFolder);
   document.getElementById("btn-generate-config").addEventListener("click", generateConfiguredFile);
+  document.getElementById("btn-publish-github").addEventListener("click", publishToGitHub);
   document.getElementById("btn-preview-links").addEventListener("click", previewLinks);
   document.getElementById("btn-send-invites").addEventListener("click", sendInvites);
 
@@ -697,12 +715,22 @@ function loadSettings() {
   document.getElementById("clientId").value = s.clientId || (CONFIG.CLIENT_ID.startsWith("PASTE") ? "" : CONFIG.CLIENT_ID);
   document.getElementById("tenantId").value = s.tenantId || (CONFIG.TENANT_ID.startsWith("PASTE") ? "" : CONFIG.TENANT_ID);
   document.getElementById("notifyEmail").value = s.notifyEmail || CONFIG.NOTIFY_EMAIL || "";
+  document.getElementById("ghOwner").value = s.ghOwner || "";
+  document.getElementById("ghRepo").value = s.ghRepo || "";
+  document.getElementById("ghBranch").value = s.ghBranch || "main";
+  document.getElementById("ghPath").value = s.ghPath || "index.html";
+  document.getElementById("ghToken").value = s.ghToken || "";
 }
 function saveSettings() {
   const s = {
     clientId: document.getElementById("clientId").value.trim(),
     tenantId: document.getElementById("tenantId").value.trim(),
     notifyEmail: document.getElementById("notifyEmail").value.trim(),
+    ghOwner: document.getElementById("ghOwner").value.trim(),
+    ghRepo: document.getElementById("ghRepo").value.trim(),
+    ghBranch: document.getElementById("ghBranch").value.trim() || "main",
+    ghPath: document.getElementById("ghPath").value.trim() || "index.html",
+    ghToken: document.getElementById("ghToken").value.trim(),
   };
   localStorage.setItem(LS_KEY, JSON.stringify(s));
   document.getElementById("save-msg").textContent = "Saved.";
@@ -981,15 +1009,17 @@ function fieldFromBox(b, withSize) {
   return { pageIndex, x, y, fontSize };
 }
 
-async function generateConfiguredFile() {
-  const out = document.getElementById("config-output");
+// Validates the current admin state and builds the new CONFIG object that
+// should be embedded — shared by both the download button and the direct
+// GitHub publish button so they can never drift apart.
+function collectNewConfig() {
   const sig = boxes.find(b => b.type === "signature");
   const name = boxes.find(b => b.type === "name");
   const date = boxes.find(b => b.type === "date");
 
-  if (!pdfBytesForAdmin) { out.innerHTML = '<div class="msg warn">Upload your policy PDF first (Step 4).</div>'; return; }
-  if (!sig || !name) { out.innerHTML = '<div class="msg warn">Add at least a Signature box and a Name box (Step 4).</div>'; return; }
-  if (!selectedFolder || !driveId) { out.innerHTML = '<div class="msg warn">Connect to Microsoft and choose a destination folder first (Steps 2-3).</div>'; return; }
+  if (!pdfBytesForAdmin) throw new Error("Upload your policy PDF first (Step 4).");
+  if (!sig || !name) throw new Error("Add at least a Signature box and a Name box (Step 4).");
+  if (!selectedFolder || !driveId) throw new Error("Connect to Microsoft and choose a destination folder first (Steps 2-3).");
 
   const s = saveSettings();
   const generatedAt = new Date().toISOString();
@@ -1008,17 +1038,40 @@ async function generateConfiguredFile() {
     POLICY_PDF_FILENAME: currentPdfFileName || "policy.pdf",
     CONFIG_GENERATED_AT: generatedAt,
   };
+  return { newConfig, generatedAt };
+}
 
+// Re-fetches this page's own currently-live source (cache-busted) and swaps
+// in the new CONFIG block, returning the full new file contents as text.
+async function buildConfiguredSource(newConfig) {
+  const resp = await fetch(location.origin + location.pathname + "?_dl=" + Date.now());
+  if (!resp.ok) throw new Error(`Could not re-read this page's own source (${resp.status}).`);
+  const originalSource = await resp.text();
+
+  const marker = /\/\* ===CONFIG_START=== \*\/[\s\S]*?\/\* ===CONFIG_END=== \*\//;
+  if (!marker.test(originalSource)) throw new Error("Could not find the CONFIG markers in this file's source.");
+
+  const newBlock = "/* ===CONFIG_START=== */\nconst CONFIG = " + JSON.stringify(newConfig, null, 2) + ";\n/* ===CONFIG_END=== */";
+  return originalSource.replace(marker, newBlock);
+}
+
+function markConfigSaved(generatedAt) {
+  currentPdfGeneratedAt = generatedAt;
+  document.getElementById("pdf-current-file").textContent =
+    `Currently embedded in this page: "${currentPdfFileName || "policy.pdf"}" (saved ${new Date(generatedAt).toLocaleString()})`;
+}
+
+// btoa() can't handle non-ASCII characters (this file has em dashes, arrows, etc.)
+// directly -- this is the standard workaround for UTF-8 safe base64 encoding.
+function utf8ToBase64(str) {
+  return btoa(unescape(encodeURIComponent(str)));
+}
+
+async function generateConfiguredFile() {
+  const out = document.getElementById("config-output");
   try {
-    const resp = await fetch(location.origin + location.pathname + "?_dl=" + Date.now());
-    if (!resp.ok) throw new Error(`Could not re-read this page's own source (${resp.status}).`);
-    const originalSource = await resp.text();
-
-    const marker = /\/\* ===CONFIG_START=== \*\/[\s\S]*?\/\* ===CONFIG_END=== \*\//;
-    if (!marker.test(originalSource)) throw new Error("Could not find the CONFIG markers in this file's source.");
-
-    const newBlock = "/* ===CONFIG_START=== */\nconst CONFIG = " + JSON.stringify(newConfig, null, 2) + ";\n/* ===CONFIG_END=== */";
-    const newSource = originalSource.replace(marker, newBlock);
+    const { newConfig, generatedAt } = collectNewConfig();
+    const newSource = await buildConfiguredSource(newConfig);
 
     const blob = new Blob([newSource], { type: "text/html" });
     const a = document.createElement("a");
@@ -1026,10 +1079,7 @@ async function generateConfiguredFile() {
     a.download = "index.html";
     a.click();
 
-    currentPdfGeneratedAt = generatedAt;
-    document.getElementById("pdf-current-file").textContent =
-      `Currently embedded in this page: "${currentPdfFileName || "policy.pdf"}" (saved ${new Date(generatedAt).toLocaleString()})`;
-
+    markConfigSaved(generatedAt);
     out.innerHTML = `<div class="msg ok">Downloaded "index.html" with <b>${currentPdfFileName || "policy.pdf"}</b> embedded
       (saved ${new Date(generatedAt).toLocaleString()}). Upload this file to your GitHub repo, replacing the old
       index.html. Your browser may save it as "index (1).html" etc. if you've downloaded one before — check your
@@ -1037,6 +1087,56 @@ async function generateConfiguredFile() {
       the live page and confirm this exact filename/timestamp still shows here in Step 4 before sending links.</div>`;
   } catch (e) {
     out.innerHTML = `<div class="msg error">${e.message}. This feature needs the page to be loaded from its real https:// GitHub Pages address (not opened as a local file).</div>`;
+  }
+}
+
+// Commits the updated file straight to GitHub via the Contents API, so there's
+// no download step and nothing new ever gets added to the repo — same path,
+// same filename, one commit updating it in place each time.
+async function publishToGitHub() {
+  const out = document.getElementById("config-output");
+  try {
+    const { newConfig, generatedAt } = collectNewConfig();
+    const s = saveSettings();
+    if (!s.ghOwner || !s.ghRepo || !s.ghToken) {
+      throw new Error('Fill in the GitHub repo owner, repo name, and a Personal Access Token above first.');
+    }
+    const branch = s.ghBranch || "main";
+    const path = (s.ghPath || "index.html").replace(/^\/+/, "");
+    const newSource = await buildConfiguredSource(newConfig);
+
+    out.innerHTML = '<div class="msg warn">Publishing to GitHub…</div>';
+    const apiBase = `https://api.github.com/repos/${encodeURIComponent(s.ghOwner)}/${encodeURIComponent(s.ghRepo)}/contents/` +
+      path.split("/").map(encodeURIComponent).join("/");
+
+    const getResp = await fetch(`${apiBase}?ref=${encodeURIComponent(branch)}`, {
+      headers: { Authorization: `Bearer ${s.ghToken}`, Accept: "application/vnd.github+json" },
+    });
+    if (!getResp.ok && getResp.status !== 404) {
+      throw new Error(`Could not read the current file from GitHub (${getResp.status}): ${await getResp.text()}`);
+    }
+    const sha = getResp.ok ? (await getResp.json()).sha : undefined;
+
+    const putResp = await fetch(apiBase, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${s.ghToken}`, Accept: "application/vnd.github+json", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: `Update policy signing page (${currentPdfFileName || "policy.pdf"}) via admin console`,
+        content: utf8ToBase64(newSource),
+        branch,
+        ...(sha ? { sha } : {}),
+      }),
+    });
+    if (!putResp.ok) {
+      throw new Error(`GitHub rejected the update (${putResp.status}): ${await putResp.text()}`);
+    }
+
+    markConfigSaved(generatedAt);
+    out.innerHTML = `<div class="msg ok">Published straight to <b>${s.ghOwner}/${s.ghRepo}</b> (branch <b>${branch}</b>,
+      <b>${path}</b>) with <b>${currentPdfFileName || "policy.pdf"}</b> embedded. No download or manual upload needed —
+      give GitHub Pages a minute, then reload the live page and confirm this shows up under Step 4 before sending links.</div>`;
+  } catch (e) {
+    out.innerHTML = `<div class="msg error">${e.message}</div>`;
   }
 }
 
